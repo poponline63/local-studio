@@ -23,6 +23,10 @@ It is built from two modules that share one controller API:
 - [`frontend/`](frontend/README.md) — Next.js 16 + React 19 UI and the macOS
   Electron desktop shell. Hosts the Workbench (`/agent`), consolidated
   Configure surface, settings, usage, logs, and browser-facing API routes.
+- [`site/`](site/README.md) — the localstudio.ai site: a Vite SPA and the
+  Cloudflare Worker that serves it, folded in from the archived
+  `local-studio-site` repository. Checks and the production deploy run from
+  [`.github/workflows/site.yml`](.github/workflows/site.yml).
 
 ## Mobile companion
 
