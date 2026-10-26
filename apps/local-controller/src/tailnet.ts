@@ -5,8 +5,8 @@ import type { LocalTailnet } from "../../../packages/contracts/src/localStudio.t
 import { type Config, decodeJson, exec, fail, fetchJson, lastLine } from "./core.ts";
 import { normUrl } from "./graph.ts";
 
-const Peer = Schema.Struct({ HostName: Schema.String, OS: Schema.String, Online: Schema.Boolean, TailscaleIPs: Schema.Array(Schema.String) });
-const Status = Schema.Struct({ Peer: Schema.optionalKey(Schema.NullOr(Schema.Record(Schema.String, Peer))) });
+const Peer = Schema.Struct({ HostName: Schema.String, DNSName: Schema.String, OS: Schema.String, Online: Schema.Boolean, TailscaleIPs: Schema.Array(Schema.String) });
+const Status = Schema.Struct({ MagicDNSSuffix: Schema.String, Peer: Schema.optionalKey(Schema.NullOr(Schema.Record(Schema.String, Peer))) });
 const decodeHealth = Schema.decodeUnknownOption(Schema.Struct({ id: Schema.String, name: Schema.String }));
 
 export const scanTailnet = (linked: Set<string>): Effect.Effect<LocalTailnet> =>
@@ -18,7 +18,8 @@ export const scanTailnet = (linked: Set<string>): Effect.Effect<LocalTailnet> =>
       status = r.code === 0 ? decodeJson(Status, r.stdout) : undefined;
     }
     if (!status) return { available: false, devices: [] };
-    const peers = Object.values(status.Peer ?? {}).filter((p) => p.Online && p.TailscaleIPs[0]);
+    const own = `.${status.MagicDNSSuffix}.`;
+    const peers = Object.values(status.Peer ?? {}).filter((p) => p.Online && p.TailscaleIPs[0] && p.DNSName.endsWith(own));
     const devices = yield* Effect.forEach(
       peers,
       (p) =>
