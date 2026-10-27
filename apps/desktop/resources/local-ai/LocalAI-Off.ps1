@@ -1,6 +1,6 @@
 ﻿# LocalAI-Off.ps1 - turns ALL local AI off: unloads models, stops the extra servers from the private config, closes Local Studio (app, controller, resource monitor,
 # agent sessions), stops Local Studio Docker engines, stops Ollama (tray app, server, runners), disables their
-# autostart entries (recorded in state.json so LocalAI-On.ps1 can restore exactly those), then verifies.
+# autostart entries (permanently - LocalAI-On.ps1 never restores them; state.json keeps a record), then verifies.
 # -AfterExit <pid>: wait for that process (Local Studio's main process, when the in-app switch is used) to exit first.
 param([switch]$Pause, [switch]$KeepAutostart, [int]$AfterExit = 0)
 $ErrorActionPreference = 'Continue'
@@ -58,40 +58,8 @@ for ($round = 1; $round -le 4; $round++) {
   Start-Sleep 2
 }
 
-# 5. Disable autostart entries for Ollama / Local Studio and record them.
-if (-not $KeepAutostart) {
-  $sh = New-Object -ComObject WScript.Shell
-  foreach ($dir in @([Environment]::GetFolderPath('Startup'), [Environment]::GetFolderPath('CommonStartup'))) {
-    foreach ($f in @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue)) {
-      $target = ''; if ($f.Extension -eq '.lnk') { try { $target = $sh.CreateShortcut($f.FullName).TargetPath } catch {} }
-      if ("$($f.Name) $target" -notmatch $AutostartPattern) { continue }
-      $dest = Join-Path $DisabledDir ("{0}__{1}" -f (Get-Date -Format 'yyyyMMddHHmmss'), $f.Name)
-      try { Move-Item -LiteralPath $f.FullName -Destination $dest -ErrorAction Stop; [void]$items.Add([pscustomobject]@{ type = 'startup'; original = $f.FullName; moved = $dest }); Save-OffState; Write-Host "  disabled Startup item $($f.FullName)" }
-      catch { Write-Host "  COULD NOT disable Startup item $($f.FullName): $($_.Exception.Message)" -ForegroundColor Yellow }
-    }
-  }
-  foreach ($key in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run') {
-    $props = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue; if (-not $props) { continue }
-    foreach ($n in $props.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' }) {
-      if ("$($n.Name) $($n.Value)" -notmatch $AutostartPattern) { continue }
-      try { Remove-ItemProperty -Path $key -Name $n.Name -ErrorAction Stop; [void]$items.Add([pscustomobject]@{ type = 'run'; key = $key; name = $n.Name; value = [string]$n.Value }); Save-OffState; Write-Host "  removed Run entry $key\$($n.Name)" }
-      catch { Write-Host "  COULD NOT remove Run entry $key\$($n.Name) (needs admin?)" -ForegroundColor Yellow }
-    }
-  }
-  foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Disabled' })) {
-    $exec = ($t.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join ' '
-    if ($t.TaskName -notmatch $AutostartPattern -and $exec.IndexOf($OllamaDir, [StringComparison]::OrdinalIgnoreCase) -lt 0 -and $exec.IndexOf($StudioDir, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
-    try { Disable-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName -ErrorAction Stop | Out-Null; [void]$items.Add([pscustomobject]@{ type = 'task'; path = $t.TaskPath; name = $t.TaskName }); Save-OffState; Write-Host "  disabled scheduled task $($t.TaskPath)$($t.TaskName)" }
-    catch { Write-Host "  COULD NOT disable task $($t.TaskName) (needs admin?)" -ForegroundColor Yellow }
-  }
-  foreach ($s in @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object { "$($_.Name) $($_.DisplayName) $($_.PathName)" -match $AutostartPattern })) {
-    if ($s.State -eq 'Running') { Stop-Service -Name $s.Name -Force -ErrorAction SilentlyContinue }
-    if ($s.StartMode -ne 'Disabled') {
-      try { Set-Service -Name $s.Name -StartupType Disabled -ErrorAction Stop; [void]$items.Add([pscustomobject]@{ type = 'service'; name = $s.Name; startMode = $s.StartMode }); Save-OffState; Write-Host "  disabled service $($s.Name)" }
-      catch { Write-Host "  COULD NOT disable service $($s.Name) (needs admin)" -ForegroundColor Yellow }
-    }
-  }
-}
+# 5. Disable/remove autostart entries for Ollama / Local Studio / extra servers (kept off permanently; recorded in state.json).
+if (-not $KeepAutostart) { foreach ($x in @(Disable-LocalAIAutostart -StopServices)) { [void]$items.Add($x) } }
 Save-OffState
 
 # 6. Verify.

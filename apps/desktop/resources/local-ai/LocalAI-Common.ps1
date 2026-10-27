@@ -22,9 +22,9 @@ function Get-ExtraConfig {
 }
 $ExtraConfig  = Get-ExtraConfig
 $ExtraServers = @(@($ExtraConfig.servers) | Where-Object { $_ -and $_.name -and $_.port })
+# Autostart entries are only touched if their name/target matches this (Ollama, Local Studio, extra servers by name).
+$AutostartPattern = (@('ollama', 'local[ -]?studio') + @($ExtraServers | ForEach-Object { [regex]::Escape([string]$_.name) })) -join '|'
 $Ports       = @(@(11434, 18091) + @($ExtraServers | ForEach-Object { [int]$_.port }))   # Ollama, Local Studio controller, extra servers
-# Autostart entries are only touched if their name/target matches this (Ollama or Local Studio).
-$AutostartPattern = 'ollama|local[ -]?studio'
 $DockerLabel = 'local-studio-t3.job'
 
 function Test-PortOpen([int]$Port) {
@@ -132,4 +132,77 @@ function Start-ExtraServer($x) {
 function Test-ExtraServerReady($x) {
   $path = if ($x.readyPath) { [string]$x.readyPath } else { '/v1/models' }
   try { $r = Invoke-WebRequest ("http://127.0.0.1:{0}{1}" -f [int]$x.port, $path) -UseBasicParsing -TimeoutSec 3; $r.StatusCode -eq 200 } catch { $false }
+}
+
+# A scheduled task belongs to the stack only if its name matches, or its action runs something from the Ollama /
+# Local Studio install dirs or an extra server's start file (other tools' tasks that merely call ollama are left alone).
+function Test-LocalAITask([string]$name, [string]$exec, $extraStarts) {
+  if ($name -match $AutostartPattern) { return $true }
+  foreach ($d in @($OllamaDir, $StudioDir) + @($extraStarts)) { if ($d -and $exec.IndexOf($d, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true } }
+  $false
+}
+
+# Local AI must never start with Windows: disables (never restores) every autostart entry for Ollama / Local Studio / extra
+# servers - Startup-folder items (moved to disabled-autostart), Run values (removed), scheduled tasks (disabled) and
+# services (start type Disabled; -StopServices also stops them). Returns what it changed, for the state.json record.
+function Disable-LocalAIAutostart([switch]$StopServices) {
+  $changed = New-Object System.Collections.ArrayList
+  New-Item -ItemType Directory -Force $DisabledDir | Out-Null
+  $sh = New-Object -ComObject WScript.Shell
+  $extraStarts = @($ExtraServers | ForEach-Object { Expand-LocalAIPath ([string]$_.start.file) } | Where-Object { $_ })
+  foreach ($dir in @([Environment]::GetFolderPath('Startup'), [Environment]::GetFolderPath('CommonStartup'))) {
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue)) {
+      $target = ''; if ($f.Extension -eq '.lnk') { try { $l = $sh.CreateShortcut($f.FullName); $target = "$($l.TargetPath) $($l.Arguments)" } catch {} }
+      $hitExtra = @($extraStarts | Where-Object { $target.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -gt 0
+      if ("$($f.Name) $target" -notmatch $AutostartPattern -and -not $hitExtra) { continue }
+      $dest = Join-Path $DisabledDir ("{0}__{1}" -f (Get-Date -Format 'yyyyMMddHHmmss'), $f.Name)
+      try { Move-Item -LiteralPath $f.FullName -Destination $dest -ErrorAction Stop; [void]$changed.Add([pscustomobject]@{ type = 'startup'; original = $f.FullName; moved = $dest }); Write-Host "  disabled Startup item $($f.FullName)" }
+      catch { Write-Host "  COULD NOT disable Startup item $($f.FullName): $($_.Exception.Message)" -ForegroundColor Yellow }
+    }
+  }
+  foreach ($key in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run') {
+    $props = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue; if (-not $props) { continue }
+    foreach ($n in $props.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' }) {
+      if ("$($n.Name) $($n.Value)" -notmatch $AutostartPattern) { continue }
+      try { Remove-ItemProperty -Path $key -Name $n.Name -ErrorAction Stop; [void]$changed.Add([pscustomobject]@{ type = 'run'; key = $key; name = $n.Name; value = [string]$n.Value }); Write-Host "  removed Run entry $key\$($n.Name)" }
+      catch { Write-Host "  COULD NOT remove Run entry $key\$($n.Name) (needs admin?)" -ForegroundColor Yellow }
+    }
+  }
+  foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Disabled' })) {
+    $exec = ($t.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join ' '
+    if (-not (Test-LocalAITask $t.TaskName $exec $extraStarts)) { continue }
+    try { Disable-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName -ErrorAction Stop | Out-Null; [void]$changed.Add([pscustomobject]@{ type = 'task'; path = $t.TaskPath; name = $t.TaskName }); Write-Host "  disabled scheduled task $($t.TaskPath)$($t.TaskName)" }
+    catch { Write-Host "  COULD NOT disable task $($t.TaskName) (needs admin?)" -ForegroundColor Yellow }
+  }
+  foreach ($s in @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object { "$($_.Name) $($_.DisplayName) $($_.PathName)" -match $AutostartPattern })) {
+    if ($StopServices -and $s.State -eq 'Running') { Stop-Service -Name $s.Name -Force -ErrorAction SilentlyContinue }
+    if ($s.StartMode -ne 'Disabled') {
+      try { Set-Service -Name $s.Name -StartupType Disabled -ErrorAction Stop; [void]$changed.Add([pscustomobject]@{ type = 'service'; name = $s.Name; startMode = $s.StartMode }); Write-Host "  disabled service $($s.Name)" }
+      catch { Write-Host "  COULD NOT disable service $($s.Name) (needs admin)" -ForegroundColor Yellow }
+    }
+  }
+  @($changed)
+}
+
+# Autostart entries that currently exist for the local-AI stack (read-only; used by Status and the post-start check).
+function Get-LocalAIAutostart {
+  $found = New-Object System.Collections.ArrayList
+  $sh = New-Object -ComObject WScript.Shell
+  $extraStarts = @($ExtraServers | ForEach-Object { Expand-LocalAIPath ([string]$_.start.file) } | Where-Object { $_ })
+  foreach ($dir in @([Environment]::GetFolderPath('Startup'), [Environment]::GetFolderPath('CommonStartup'))) {
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue)) {
+      $target = ''; if ($f.Extension -eq '.lnk') { try { $l = $sh.CreateShortcut($f.FullName); $target = "$($l.TargetPath) $($l.Arguments)" } catch {} }
+      if ("$($f.Name) $target" -match $AutostartPattern) { [void]$found.Add("Startup: $($f.FullName)") }
+    }
+  }
+  foreach ($key in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run') {
+    $props = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue; if (-not $props) { continue }
+    foreach ($n in $props.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' }) { if ("$($n.Name) $($n.Value)" -match $AutostartPattern) { [void]$found.Add("Run: $key\$($n.Name)") } }
+  }
+  foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Disabled' })) {
+    $exec = ($t.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join ' '
+    if (Test-LocalAITask $t.TaskName $exec $extraStarts) { [void]$found.Add("Task: $($t.TaskPath)$($t.TaskName)") }
+  }
+  foreach ($s in @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | Where-Object { $_.StartMode -ne 'Disabled' -and "$($_.Name) $($_.DisplayName) $($_.PathName)" -match $AutostartPattern })) { [void]$found.Add("Service: $($s.Name) ($($s.StartMode))") }
+  @($found)
 }

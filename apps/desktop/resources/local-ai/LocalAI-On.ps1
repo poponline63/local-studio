@@ -1,5 +1,5 @@
-﻿# LocalAI-On.ps1 - re-enables only the autostart entries LocalAI-Off disabled, then starts Ollama (serve, cloud
-# disabled) and Local Studio, and waits until 11434 (Ollama) and 18091 (Local Studio controller) answer.
+﻿# LocalAI-On.ps1 - starts the local-AI stack for this session only (never re-enables autostart): Ollama (headless
+# 'ollama serve', cloud disabled, never the tray app) and Local Studio, and waits until 11434 (Ollama) and 18091 (Local Studio controller) answer.
 # Extra servers (private config, see LocalAI-Common.ps1): -Extra starts those with startOnLaunch (default true),
 # -NoExtra starts none; default = only those that were running when Off ran.
 # -NoStudio is used by Local Studio itself (the in-app Local AI switch runs this at launch).
@@ -11,21 +11,12 @@ Start-Transcript -Path (Join-Path $LogDir 'last-on.log') -Force | Out-Null
 Write-Host "== Local AI ON ==  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Cyan
 $rc = 0
 
-# 1. Restore exactly what Off disabled.
+# 1. Never restore autostart entries: Local AI only runs while Local Studio is open (or when started by hand) and never
+#    starts with Windows. The 'disabled' list in state.json is kept as a record only.
 $state = Read-State
-$failed = New-Object System.Collections.ArrayList
-foreach ($x in @($state.disabled)) {
-  if (-not $x) { continue }
-  try {
-    switch ($x.type) {
-      'startup' { if (Test-Path -LiteralPath $x.moved) { Move-Item -LiteralPath $x.moved -Destination $x.original -Force -ErrorAction Stop }; Write-Host "  restored Startup item $($x.original)" }
-      'run'     { New-ItemProperty -Path $x.key -Name $x.name -Value $x.value -PropertyType String -Force -ErrorAction Stop | Out-Null; Write-Host "  restored Run entry $($x.key)\$($x.name)" }
-      'task'    { Enable-ScheduledTask -TaskPath $x.path -TaskName $x.name -ErrorAction Stop | Out-Null; Write-Host "  re-enabled task $($x.path)$($x.name)" }
-      'service' { $m = @{ Auto = 'Automatic'; Manual = 'Manual'; Boot = 'Automatic'; System = 'Automatic' }[[string]$x.startMode]; if (-not $m) { $m = 'Manual' }; Set-Service -Name $x.name -StartupType $m -ErrorAction Stop; Write-Host "  restored service $($x.name) -> $m" }
-    }
-  } catch { Write-Host "  COULD NOT restore $($x.type) $($x.name)$($x.original): $($_.Exception.Message)" -ForegroundColor Yellow; [void]$failed.Add($x) }
-}
-[IO.File]::WriteAllText($StateFile, ([pscustomobject]@{ state = 'on'; changedAt = (Get-Date).ToString('s'); disabled = @($failed) } | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding $false))
+$record = @(@($state.disabled) | Where-Object { $_ })
+function Save-OnState { [IO.File]::WriteAllText($StateFile, ([pscustomobject]@{ state = 'on'; changedAt = (Get-Date).ToString('s'); extraWasRunning = @($state.extraWasRunning); disabled = @($record) } | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding $false)) }
+Save-OnState
 
 # Environment for everything started from here: local-only discovery shim on PATH, Ollama cloud disabled.
 Initialize-LsofShim
@@ -71,6 +62,11 @@ if (-not $NoStudio) {
     Write-Host "  controller /v1/models: $(@($models) -join ', ')"
   } else { Write-Host "  Local Studio controller did NOT come up on 18091" -ForegroundColor Red; $rc = 1 }
 }
+# 4. Anything started above (or an Ollama update/installer) must not have (re)created an autostart entry.
+$new = @(Disable-LocalAIAutostart)
+if ($new) { $record = @($record) + $new; Save-OnState }
+$left = @(Get-LocalAIAutostart)
+if ($left) { Write-Host "  WARNING - autostart entries still present: $($left -join '; ')" -ForegroundColor Yellow } else { Write-Host "  autostart: none (Local AI will not start with Windows)" }
 Write-Host ""
 if ($rc -eq 0) { Write-Host "OK - Local AI is ON." -ForegroundColor Green } else { Write-Host "Local AI started with problems (see above)." -ForegroundColor Red }
 Stop-Transcript | Out-Null

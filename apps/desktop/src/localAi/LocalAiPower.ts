@@ -2,10 +2,10 @@
 // @effect-diagnostics globalTimers:off -- Quit fallback and arm timers run in Electron callbacks outside any Effect fiber.
 // Local AI power switch (Windows): runs the bundled LocalAI-On/Off PowerShell scripts
 // (resources/local-ai) so Local Studio itself can bring the local model stack up at launch
-// and shut ALL of it down (Ollama, extra local servers, controller, helpers) on demand.
+// and shut ALL of it down (Ollama, extra local servers, controller, helpers) on demand and whenever the app quits.
 // Extra servers (e.g. a llama.cpp llama-server) come from a private per-user file that is never part of the repo:
 // %USERPROFILE%/.local-studio-t3/local-ai-extra.json (or LOCALAI_EXTRA_CONFIG); see resources/local-ai/local-ai-extra.example.json.
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as FS from "node:fs";
 import * as Net from "node:net";
 import * as OS from "node:os";
@@ -130,23 +130,44 @@ function runScript(
   return child;
 }
 
-function launchOutsideAppTree(name: string, args: ReadonlyArray<string>): Promise<boolean> {
-  const dir = scriptsDir();
-  if (!dir) return Promise.resolve(false);
-  const commandLine = [
+const WMI_CREATE =
+  "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $env:LOCALAI_FINISHER_CMD }; exit [int]$r.ReturnValue";
+
+function finisherCommandLine(dir: string, name: string, args: ReadonlyArray<string>): string {
+  return [
     "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File",
     `"${Path.join(dir, name)}"`,
     ...args,
   ].join(" ");
+}
+
+// Blocking variant for quit handlers: returns only once the finisher process exists outside
+// the app's process tree, so it cannot be torn down with the app.
+function launchOutsideAppTreeSync(name: string, args: ReadonlyArray<string>): boolean {
+  const dir = scriptsDir();
+  if (!dir) return false;
+  const result = spawnSync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", WMI_CREATE],
+    {
+      windowsHide: true,
+      stdio: "ignore",
+      timeout: 15_000,
+      env: { ...runtime.env, LOCALAI_FINISHER_CMD: finisherCommandLine(dir, name, args) },
+    },
+  );
+  if (result.status === 0) return true;
+  return runScript(name, args, true) !== null;
+}
+
+function launchOutsideAppTree(name: string, args: ReadonlyArray<string>): Promise<boolean> {
+  const dir = scriptsDir();
+  if (!dir) return Promise.resolve(false);
+  const commandLine = finisherCommandLine(dir, name, args);
   return new Promise((resolve) => {
     const child = spawn(
       "powershell.exe",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $env:LOCALAI_FINISHER_CMD }; exit [int]$r.ReturnValue",
-      ],
+      ["-NoProfile", "-NonInteractive", "-Command", WMI_CREATE],
       {
         windowsHide: true,
         stdio: "ignore",
@@ -239,6 +260,19 @@ export function installLocalAiPower(): void {
     return value === true;
   });
   if (!isWindows) return;
+  // Local AI runs only while the app is open: ANY quit (closing the last window, Alt+F4, menu/tray quit,
+  // the power button) runs the full Off out-of-process. The first before-quit is the one every
+  // user-initiated quit goes through; the updater's quit-and-install is left alone.
+  let updaterQuit = false;
+  Electron.autoUpdater.on("before-quit-for-update", () => {
+    updaterQuit = true;
+  });
+  Electron.app.on("before-quit", () => {
+    if (shuttingDown || updaterQuit) return;
+    shuttingDown = true;
+    if (onChild && onChild.exitCode === null) onChild.kill();
+    launchOutsideAppTreeSync("LocalAI-Off.ps1", ["-AfterExit", String(runtime.pid)]);
+  });
   void Electron.app.whenReady().then(() => {
     if (readSettings().autoStartOnLaunch) turnOn();
   });

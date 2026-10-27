@@ -18,7 +18,9 @@ if ($cont) { Write-Host "Local Studio Docker engines running: $($cont -join ', '
 if (Test-PortOpen 11434) {
   try { $loaded = @((Invoke-RestMethod 'http://127.0.0.1:11434/api/ps' -TimeoutSec 5).models); Write-Host "Models loaded in memory: $(if ($loaded) { ($loaded | ForEach-Object { '{0} ({1:N1} GB VRAM)' -f $_.name, ($_.size_vram / 1GB) }) -join ', ' } else { 'none' })" } catch {}
 }
-Write-Host "Autostart entries currently disabled by LocalAI-Off: $(@($state.disabled | Where-Object { $_ }).Count)"
+$auto = @(Get-LocalAIAutostart)
+Write-Host "Autostart entries for local AI: $(if ($auto) { $auto -join '; ' } else { 'none (nothing starts with Windows)' })"
+Write-Host "Autostart entries ever disabled by LocalAI (record): $(@($state.disabled | Where-Object { $_ }).Count)"
 $smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
 if ($smi) {
   Write-Host "GPU:"
