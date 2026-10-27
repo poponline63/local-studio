@@ -1519,6 +1519,23 @@ export function createStagePatchedDependencies(
   );
 }
 
+// The sidecar installs without a lockfile, so a caret range can float past the
+// exact version a patch targets (e.g. node-pty ^1.2.0-beta.15 -> a newer beta),
+// which pnpm rejects with ERR_PNPM_UNUSED_PATCH. Pin patched packages to the
+// version their patch was written for.
+export function pinPatchedDependencyVersions(
+  dependencies: Record<string, string>,
+  patchedDependencies: Record<string, string>,
+): Record<string, string> {
+  const pinned = { ...dependencies };
+  for (const patchKey of Object.keys(patchedDependencies)) {
+    const name = getPatchedDependencyPackageName(patchKey);
+    const separator = patchKey.lastIndexOf("@");
+    if (separator > 0 && Object.hasOwn(pinned, name)) pinned[name] = patchKey.slice(separator + 1);
+  }
+  return pinned;
+}
+
 function getPatchedDependencyPackageName(patchKey: string): string {
   const versionSeparator = patchKey.lastIndexOf("@");
   return versionSeparator > 0 ? patchKey.slice(0, versionSeparator) : patchKey;
@@ -2711,6 +2728,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       ...(platform === "linux" ? LINUX_CAPTURE_EXTRA_RESOURCES : []),
       ...(platform === "linux" ? LINUX_BROWSER_SECRET_EXTRA_RESOURCES : []),
       ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
+      ...(platform === "win"
+        ? [{ from: "apps/desktop/prod-resources/local-ai", to: "local-ai" }]
+        : []),
       ...(platform === "win" && wslRuntimeBundled ? WSL_RUNTIME_EXTRA_RESOURCES : []),
     ],
   };
@@ -2966,10 +2986,13 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   yield* fs.makeDirectory(path.join(serverStageDir, "apps/server"), { recursive: true });
   yield* fs.copy(input.serverDistDir, path.join(serverStageDir, "apps/server/dist"));
 
-  const sidecarDependencies = {
-    ...input.runtimeExternalDependencies,
-    ...resolveFffNativeDependencies("win", input.arch, input.fffNodeVersion),
-  };
+  const sidecarDependencies = pinPatchedDependencyVersions(
+    {
+      ...input.runtimeExternalDependencies,
+      ...resolveFffNativeDependencies("win", input.arch, input.fffNodeVersion),
+    },
+    input.patchedDependencies,
+  );
   const sidecarPatchedDependencies = createStagePatchedDependencies(
     input.patchedDependencies,
     sidecarDependencies,

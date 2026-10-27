@@ -67,6 +67,9 @@ import * as DesktopWindow from "./window/DesktopWindow.ts";
 import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
 import * as DesktopWslServerTree from "./wsl/DesktopWslServerTree.ts";
+import { installLocalAiPower } from "./localAi/LocalAiPower.ts";
+
+installLocalAiPower();
 
 const desktopEnvironmentLayer = Layer.unwrap(
   Effect.gen(function* () {

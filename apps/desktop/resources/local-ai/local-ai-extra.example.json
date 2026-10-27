@@ -1,0 +1,30 @@
+{
+  "_comment": "Copy to %USERPROFILE%\\.local-studio-t3\\local-ai-extra.json (private, per user; never commit it). Every field except name/port is optional.",
+  "ollamaReasoningPattern": "qwen|deepseek-r1",
+  "servers": [
+    {
+      "name": "my-llama-server",
+      "port": 8080,
+      "start": { "file": "%USERPROFILE%\\llama\\start-server.cmd", "args": [] },
+      "startOnLaunch": true,
+      "processPathPrefixes": ["%USERPROFILE%\\llama\\"],
+      "commandLinePatterns": ["start-server\\.cmd"],
+      "readyPath": "/v1/models",
+      "readyTimeoutSec": 300,
+      "gatewayBaseUrl": "http://127.0.0.1:8080/v1",
+      "pi": {
+        "provider": "local-my-llama",
+        "name": "my-llama-server (this PC, :8080)",
+        "models": [
+          {
+            "id": "my-model",
+            "contextWindow": 16384,
+            "maxTokens": 4096,
+            "reasoning": false,
+            "input": ["text"]
+          }
+        ]
+      }
+    }
+  ]
+}

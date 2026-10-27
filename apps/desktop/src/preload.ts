@@ -62,6 +62,15 @@ function unwrapEnsureSshEnvironmentResult(result: unknown) {
   return result as Awaited<ReturnType<DesktopBridge["ensureSshEnvironment"]>>;
 }
 
+// Local AI power switch (see src/localAi/LocalAiPower.ts).
+contextBridge.exposeInMainWorld("localAiPower", {
+  status: () => ipcRenderer.invoke("local-ai:status"),
+  powerOff: () => ipcRenderer.invoke("local-ai:power-off"),
+  powerOn: () => ipcRenderer.invoke("local-ai:power-on"),
+  setStartExtraServersOnLaunch: (value: boolean) =>
+    ipcRenderer.invoke("local-ai:set-start-extra", value),
+});
+
 contextBridge.exposeInMainWorld("desktopBridge", {
   getAppBranding: () => {
     const result = ipcRenderer.sendSync(IpcChannels.GET_APP_BRANDING_CHANNEL);

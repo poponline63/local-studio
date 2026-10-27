@@ -1,6 +1,9 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { LOCAL_STUDIO_CONTROLLER_HEADER, type LocalEndpoint } from "../../../packages/contracts/src/localStudio.ts";
+import {
+  LOCAL_STUDIO_CONTROLLER_HEADER,
+  type LocalEndpoint,
+} from "../../../packages/contracts/src/localStudio.ts";
 import { exec, fetchJson, now } from "./core.ts";
 
 export interface Endpoint extends LocalEndpoint {
@@ -13,14 +16,23 @@ interface Listener {
   pid: number | null;
 }
 
-const decodeModels = Schema.decodeUnknownOption(Schema.Struct({ data: Schema.Array(Schema.Struct({ id: Schema.String })) }));
+const decodeModels = Schema.decodeUnknownOption(
+  Schema.Struct({ data: Schema.Array(Schema.Struct({ id: Schema.String })) }),
+);
 const NEGATIVE_MS = 5 * 60_000;
 const FORGET_MS = 10 * 60_000;
 
 const listener = (addr: string, pid: number | null): Listener[] => {
   const i = addr.lastIndexOf(":");
-  const a = addr.slice(0, i).replace(/^\[|\]$/g, "").replace(/%.*$/, "");
-  const host = ["*", "0.0.0.0", "::", "::1"].includes(a) ? "127.0.0.1" : /^\d+\.\d+\.\d+\.\d+$/.test(a) ? a : null;
+  const a = addr
+    .slice(0, i)
+    .replace(/^\[|\]$/g, "")
+    .replace(/%.*$/, "");
+  const host = ["*", "0.0.0.0", "::", "::1"].includes(a)
+    ? "127.0.0.1"
+    : /^\d+\.\d+\.\d+\.\d+$/.test(a)
+      ? a
+      : null;
   const port = Number(addr.slice(i + 1));
   return host && Number.isInteger(port) && port > 0 ? [{ host, port, pid }] : [];
 };
@@ -44,7 +56,9 @@ export const listeners: Effect.Effect<Listener[]> = Effect.gen(function* () {
   const raw =
     process.platform === "linux"
       ? parseSs((yield* exec(["ss", "-H", "-ltnp"], 5_000)).stdout)
-      : parseLsof((yield* exec(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pn"], 8_000)).stdout);
+      : parseLsof(
+          (yield* exec(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pn"], 8_000)).stdout,
+        );
   const seen = new Map<number, Listener>();
   for (const l of raw) {
     const prev = seen.get(l.port);
@@ -62,15 +76,36 @@ export const makeScanner = (controllerId: string, jobPort: (port: number) => str
       const tag = `${l.port}:${l.pid ?? ""}`;
       if ((negative.get(tag) ?? 0) > Date.now()) return;
       const key = keys[String(l.port)];
-      const r = yield* Effect.option(fetchJson(`http://${l.host}:${l.port}/v1/models`, 1_500, key ? { authorization: `Bearer ${key}` } : {}));
+      const r = yield* Effect.option(
+        fetchJson(
+          `http://${l.host}:${l.port}/v1/models`,
+          1_500,
+          key ? { authorization: `Bearer ${key}` } : {},
+        ),
+      );
       const got = r._tag === "Some" ? r.value : null;
-      const list = got && got.status === 200 && !got.headers.get(LOCAL_STUDIO_CONTROLLER_HEADER) ? decodeModels(got.body) : null;
+      const list =
+        got && got.status === 200 && !got.headers.get(LOCAL_STUDIO_CONTROLLER_HEADER)
+          ? decodeModels(got.body)
+          : null;
       if (!list || list._tag === "None" || !list.value.data.length) {
-        if (got && !jobPort(l.port)) negative.set(tag, Date.now() + NEGATIVE_MS);
+        // 503 = model server still loading (llama-server): retry on the next scan instead of hiding it for 5 min.
+        if (got && got.status !== 503 && !jobPort(l.port))
+          negative.set(tag, Date.now() + NEGATIVE_MS);
         return;
       }
       const models = [...new Set(list.value.data.map((m) => m.id))].sort();
-      known.set(l.port, { id: `${controllerId}:${l.port}`, controllerId, port: l.port, pid: l.pid, models, live: true, lastSeenAt: now(), jobId: jobPort(l.port), base: `http://${l.host}:${l.port}` });
+      known.set(l.port, {
+        id: `${controllerId}:${l.port}`,
+        controllerId,
+        port: l.port,
+        pid: l.pid,
+        models,
+        live: true,
+        lastSeenAt: now(),
+        jobId: jobPort(l.port),
+        base: `http://${l.host}:${l.port}`,
+      });
       return l.port;
     });
   return {
